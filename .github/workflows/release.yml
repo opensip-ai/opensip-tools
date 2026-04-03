@@ -25,12 +25,10 @@ jobs:
       - run: pnpm test
       - name: Publish packages
         run: |
-          pnpm --filter @opensip-tools/core publish --no-git-checks --access public
-          pnpm --filter @opensip-tools/checks-builtin publish --no-git-checks --access public
-          pnpm --filter @opensip-tools/simulation publish --no-git-checks --access public
-          pnpm --filter @opensip-tools/cli publish --no-git-checks --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          pnpm --filter @opensip-tools/core publish --no-git-checks --access public --provenance
+          pnpm --filter @opensip-tools/checks-builtin publish --no-git-checks --access public --provenance
+          pnpm --filter @opensip-tools/simulation publish --no-git-checks --access public --provenance
+          pnpm --filter @opensip-tools/cli publish --no-git-checks --access public --provenance
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
