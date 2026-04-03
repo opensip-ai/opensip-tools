@@ -1,0 +1,34 @@
+import React from 'react';
+import { describe, it, expect } from 'vitest';
+import { render } from 'ink-testing-library';
+import { ThemeProvider } from '../../../ui/theme.js';
+import { Banner } from '../../../ui/components/Banner.js';
+
+describe('Banner', () => {
+  it('renders the ASCII art banner with block characters', () => {
+    const { lastFrame } = render(
+      <ThemeProvider>
+        <Banner />
+      </ThemeProvider>,
+    );
+
+    const output = lastFrame()!;
+    // Banner uses block characters like U+2588 (full block)
+    expect(output).toContain('\u2588');
+    // Banner saucer line is present
+    expect(output).toContain('\u2591');
+  });
+
+  it('renders multiple lines of banner art', () => {
+    const { lastFrame } = render(
+      <ThemeProvider>
+        <Banner />
+      </ThemeProvider>,
+    );
+
+    const output = lastFrame()!;
+    const lines = output.split('\n');
+    // Banner has 8 art lines + 1 saucer line = 9 minimum
+    expect(lines.length).toBeGreaterThanOrEqual(9);
+  });
+});

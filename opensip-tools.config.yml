@@ -1,0 +1,144 @@
+# OpenSIP Tools — Signalers Configuration
+#
+# Defines named file sets (targets) for fitness checks and configures
+# how each signal producer analyzes the codebase.
+
+# =============================================================================
+# Targets
+# =============================================================================
+
+globalExcludes:
+  - "docs/**"
+
+targets:
+  backend:
+    description: Core packages and CLI
+    languages: [typescript]
+    concerns: [backend, server, api]
+    include:
+      - "packages/*/src/**/*.ts"
+    exclude:
+      - "**/*.test.ts"
+      - "**/__tests__/**"
+      - "**/node_modules/**"
+      - "**/dist/**"
+    tags:
+      - production
+      - node
+      - typescript
+
+  cli:
+    description: CLI application
+    languages: [typescript]
+    concerns: [cli]
+    include:
+      - "packages/cli/src/**/*.ts"
+    exclude:
+      - "**/*.test.ts"
+      - "**/__tests__/**"
+      - "**/node_modules/**"
+      - "**/dist/**"
+    tags:
+      - production
+      - node
+      - typescript
+
+  tests:
+    description: All test files
+    languages: [typescript]
+    concerns: [testing]
+    include:
+      - "**/*.test.ts"
+      - "**/__tests__/**/*.ts"
+    exclude:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    tags:
+      - testing
+      - typescript
+
+  all-ts:
+    description: All TypeScript files
+    languages: [typescript]
+    include:
+      - "**/*.ts"
+    exclude:
+      - "**/node_modules/**"
+      - "**/dist/**"
+    tags:
+      - typescript
+
+  fitness-checks:
+    description: Fitness check definitions
+    languages: [typescript]
+    concerns: [fitness]
+    include:
+      - "packages/fitness/src/checks/**/*.ts"
+    exclude:
+      - "**/*.test.ts"
+      - "**/__tests__/**"
+      - "**/index.ts"
+      - "**/node_modules/**"
+      - "**/dist/**"
+    tags:
+      - fitness
+      - typescript
+
+  configs:
+    description: Configuration files
+    languages: [json, typescript, yaml]
+    concerns: [config]
+    include:
+      - "**/tsconfig.json"
+      - "**/package.json"
+      - "**/vitest.config.ts"
+      - "turbo.json"
+    exclude:
+      - "**/node_modules/**"
+    tags:
+      - config
+
+# =============================================================================
+# Fitness Configuration
+# =============================================================================
+
+fitness:
+  failOnErrors: 1
+  failOnWarnings: 0
+  reconcile: false
+  disabledChecks:
+    # Docker
+    - docker-version-sync
+    - docker-best-practices
+    - docker-ignore-validation
+    # Hasura / GraphQL
+    - hasura-production-config
+    - graphql-offset-pagination
+    # React / Accessibility / Mobile
+    - a11y-form-labels
+    - a11y-semantic-html
+    - accessibility-icon-rendering
+    - modal-accessibility
+    - aria-landmarks
+    - accessible-touchables
+    - expo-vector-icons
+    - image-optimization
+    - flashlist-enforcement
+    - platform-checks
+    - memo-list-items
+    - frontend-client-boundary-placement
+    # CSS / Styling / Theme
+    - heading-style-consistency
+    - theme-token-usage
+    - lineheight-token-usage
+    - zindex-token-usage
+    # UI Components
+    - shared-component-usage
+    - raw-html-elements
+    - modal-consistency
+    - nextjs-conventions
+    - datatable-column-tooltips
+    - datatable-pagination
+
+simulation:
+  reconcile: false

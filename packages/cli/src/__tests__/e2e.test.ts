@@ -1,0 +1,222 @@
+/**
+ * End-to-end tests for the opensip-tools CLI.
+ *
+ * These tests exercise the actual CLI binary (packages/cli/dist/index.js)
+ * against a small fixture project. The build must be done before running
+ * these tests (pnpm --filter=@opensip-tools/cli build).
+ */
+
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { describe, it, expect, afterEach } from 'vitest';
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+// __dirname = packages/cli/src/__tests__/ → CLI binary is at packages/cli/dist/index.js
+const CLI = join(__dirname, '../../dist/index.js');
+const FIXTURE = join(__dirname, 'fixtures/sample-project');
+
+/** Run the CLI binary with the given arguments and return stdout + exitCode. */
+function run(...args: string[]): { stdout: string; exitCode: number } {
+  try {
+    const stdout = execFileSync('node', [CLI, ...args], {
+      cwd: FIXTURE,
+      encoding: 'utf-8',
+      timeout: 60_000,
+      env: { ...process.env, NO_COLOR: '1' },
+    });
+    return { stdout, exitCode: 0 };
+  } catch (err: any) {
+    return { stdout: err.stdout ?? '', exitCode: err.status ?? 1 };
+  }
+}
+
+/** Run the CLI in a specific working directory. */
+function runIn(cwd: string, ...args: string[]): { stdout: string; exitCode: number } {
+  try {
+    const stdout = execFileSync('node', [CLI, ...args], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 60_000,
+      env: { ...process.env, NO_COLOR: '1' },
+    });
+    return { stdout, exitCode: 0 };
+  } catch (err: any) {
+    return { stdout: err.stdout ?? '', exitCode: err.status ?? 1 };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('CLI e2e', () => {
+  it('--help shows usage information', () => {
+    const { stdout, exitCode } = run('--help');
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('Commands:');
+    expect(stdout).toContain('fit');
+  });
+
+  it('--version shows the version string', () => {
+    const { stdout, exitCode } = run('--version');
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toBe('0.1.0');
+  });
+
+  describe('fit', () => {
+    it('runs successfully with --json', () => {
+      const { stdout, exitCode } = run('fit', '--json');
+      // Parse as JSON — should not throw
+      const output = JSON.parse(stdout);
+      expect(output.version).toBe('1.0');
+      expect(output.tool).toBe('fit');
+      expect(output.summary).toBeDefined();
+      expect(typeof output.summary.total).toBe('number');
+      expect(typeof output.summary.passed).toBe('number');
+      expect(typeof output.summary.failed).toBe('number');
+      // Exit code depends on whether shouldFail is set; just verify it parsed
+      expect([0, 1]).toContain(exitCode);
+    });
+
+    it('--list shows available checks', () => {
+      const { stdout, exitCode } = run('fit', '--list');
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain('Available Fitness Checks');
+    });
+
+    it('--recipes shows available recipes', () => {
+      const { stdout, exitCode } = run('fit', '--recipes');
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain('Available Recipes');
+    });
+
+    it('--list --json outputs valid JSON', () => {
+      const { stdout, exitCode } = run('fit', '--list', '--json');
+      expect(exitCode).toBe(0);
+      const output = JSON.parse(stdout);
+      expect(output.type).toBe('list-checks');
+      expect(Array.isArray(output.checks)).toBe(true);
+      expect(output.totalCount).toBeGreaterThan(0);
+    });
+
+    it('--recipes --json outputs valid JSON', () => {
+      const { stdout, exitCode } = run('fit', '--recipes', '--json');
+      expect(exitCode).toBe(0);
+      const output = JSON.parse(stdout);
+      expect(output.type).toBe('list-recipes');
+      expect(Array.isArray(output.recipes)).toBe(true);
+    });
+
+    it('--check runs a single check', () => {
+      const { stdout } = run('fit', '--json', '--check', 'no-console-log');
+      const output = JSON.parse(stdout);
+      expect(output.tool).toBe('fit');
+      expect(output.summary).toBeDefined();
+    });
+
+    it('--recipe quick-smoke runs without error', () => {
+      const { stdout } = run('fit', '--json', '--recipe', 'quick-smoke');
+      const output = JSON.parse(stdout);
+      expect(output.tool).toBe('fit');
+      expect(output.summary).toBeDefined();
+      expect(output.summary.total).toBeGreaterThan(0);
+    });
+
+    it('--json summary fields have expected types', () => {
+      const { stdout } = run('fit', '--json', '--recipe', 'quick-smoke');
+      const output = JSON.parse(stdout);
+      expect(typeof output.timestamp).toBe('string');
+      expect(typeof output.score).toBe('number');
+      expect(typeof output.passed).toBe('boolean');
+      expect(typeof output.durationMs).toBe('number');
+      expect(Array.isArray(output.checks)).toBe(true);
+    });
+
+    it('unknown recipe produces error JSON', () => {
+      const { stdout, exitCode } = run('fit', '--json', '--recipe', 'nonexistent-recipe');
+      expect(exitCode).not.toBe(0);
+      const output = JSON.parse(stdout);
+      expect(output.error).toBeDefined();
+      expect(output.error).toContain('nonexistent-recipe');
+    });
+  });
+
+  describe('sim', () => {
+    it('shows development notice', () => {
+      const { stdout, exitCode } = run('sim');
+      expect(exitCode).toBe(0);
+      // The ExperimentalNotice contains "Under active development"
+      expect(stdout).toContain('development');
+    });
+  });
+
+  describe('sessions list', () => {
+    it('runs without crashing', () => {
+      const { exitCode } = run('sessions', 'list');
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  describe('plugin list', () => {
+    it('shows plugin information', () => {
+      const { stdout, exitCode } = run('plugin', 'list');
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain('Installed Plugins');
+    });
+  });
+
+  describe('init', () => {
+    let tempDir: string;
+
+    afterEach(() => {
+      if (tempDir && existsSync(tempDir)) {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('creates config file in a fresh directory', () => {
+      tempDir = join(tmpdir(), `opensip-e2e-init-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      mkdirSync(tempDir, { recursive: true });
+
+      const { exitCode } = runIn(tempDir, 'init');
+      expect(exitCode).toBe(0);
+
+      const configPath = join(tempDir, 'opensip-tools.config.yml');
+      expect(existsSync(configPath)).toBe(true);
+    });
+
+    it('reports already exists on second run', () => {
+      tempDir = join(tmpdir(), `opensip-e2e-init2-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      mkdirSync(tempDir, { recursive: true });
+
+      // First run creates the file
+      runIn(tempDir, 'init');
+      // Second run should indicate it already exists
+      const { stdout, exitCode } = runIn(tempDir, 'init', '--json');
+      expect(exitCode).toBe(0);
+      const output = JSON.parse(stdout);
+      expect(output.alreadyExists).toBe(true);
+      expect(output.created).toBe(false);
+    });
+  });
+
+  describe('output cleanliness', () => {
+    it('NO_COLOR=1 disables ANSI escape sequences', () => {
+      const { stdout } = run('--help');
+      // ANSI escape sequences start with ESC (0x1b)
+      // eslint-disable-next-line no-control-regex
+      const hasAnsi = /\x1b\[/.test(stdout);
+      expect(hasAnsi).toBe(false);
+    });
+
+    it('--list output has no ANSI escape sequences', () => {
+      const { stdout } = run('fit', '--list');
+      // eslint-disable-next-line no-control-regex
+      const hasAnsi = /\x1b\[/.test(stdout);
+      expect(hasAnsi).toBe(false);
+    });
+  });
+});

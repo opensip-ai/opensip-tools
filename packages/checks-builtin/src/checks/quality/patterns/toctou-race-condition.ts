@@ -1,0 +1,268 @@
+/**
+ * @fileoverview TOCTOU Race Condition Detection Check
+ * @invariants standard
+ * @module cli/devtools/fitness/src/checks/quality/patterns/toctou-race-condition
+ * @version 2.0.0
+ *
+ * Detects Time-of-Check-Time-of-Use race conditions where data is read,
+ * then updated without passing version/condition for atomic updates.
+ */
+
+import * as ts from 'typescript'
+
+import { defineCheck, type CheckViolation } from '@opensip-tools/core'
+import { getSharedSourceFile } from '@opensip-tools/core/framework/parse-cache.js'
+import { isTestFile } from '../../../utils/index.js'
+
+/** Patterns that indicate proper atomic update handling */
+const ATOMIC_PATTERNS = [
+  /expectedVersion/i,
+  /version\s*:/,
+  /ConditionExpression/,
+  /conditionalUpdate/i,
+  /atomicUpdate/i,
+  /compareAndSwap/i,
+  /optimisticLock/i,
+  /CONCURRENCY SAFE/,
+  // Transaction patterns
+  /transaction/i,
+  /beginTransaction/i,
+  /withTransaction/i,
+  /runInTransaction/i,
+  // Lock patterns
+  /acquireLock/i,
+  /withLock/i,
+  /mutex/i,
+  // Idempotency patterns
+  /idempotent/i,
+  /idempotencyKey/i,
+  // Single-threaded/in-memory safety comments
+  /single-threaded/i,
+  /in-memory/i,
+  /atomic in.*Node/i,
+]
+
+/**
+ * Paths where TOCTOU is typically not a concern
+ * (in-memory caches, rate limiters, local state managers)
+ */
+const SAFE_TOCTOU_PATHS = [
+  // In-memory data structures
+  /\/cache\//i,
+  /\/caching\//i,
+  /memory-backend/i,
+  /memory-cache/i,
+  /memory-store/i,
+  /in-memory/i,
+  // Rate limiting (bounded operations)
+  /rate-limit/i,
+  /rate_limit/i,
+  // Local state management
+  /local-storage/i,
+  /local-state/i,
+  /state-manager/i,
+  // CLI/DevTools/scripts (single user, non-concurrent)
+  // CLI commands use local Map/Set operations that are not shared-state TOCTOU risks.
+  // Server lifecycle TOCTOU issues are better caught by the reentrancy-guard check.
+  /\/cli\//,
+  /\/devtools\//,
+  /\/scripts\//,
+  // Test utilities
+  /\/testing\//,
+  /test-utils/,
+  // Configuration/Registry (startup-time operations)
+  /\/config\//,
+  /\/registry\//,
+  /\/di-registration\//,
+  /\/factories\//,
+]
+
+/**
+ * Check if a file path is in a safe TOCTOU context
+ */
+function isSafeToctouPath(filePath: string): boolean {
+  return SAFE_TOCTOU_PATHS.some((pattern) => pattern.test(filePath))
+}
+
+/** Read operation patterns */
+const READ_PATTERNS = [
+  /\.get\(/,
+  /\.find\(/,
+  /\.findOne\(/,
+  /\.getById\(/,
+  /\.fetch\(/,
+  /\.load\(/,
+  /\.read\(/,
+]
+
+/** Update operation patterns */
+const UPDATE_PATTERNS = [/\.update\(/, /\.save\(/, /\.put\(/, /\.set\(/, /\.patch\(/, /\.modify\(/]
+
+/**
+ * Check if content has required read/update patterns
+ */
+function hasRequiredPatterns(content: string): boolean {
+  const hasRead = READ_PATTERNS.some((p) => p.test(content))
+  const hasUpdate = UPDATE_PATTERNS.some((p) => p.test(content))
+  return hasRead && hasUpdate
+}
+
+/**
+ * Check if content has atomic patterns
+ */
+function hasAtomicPatterns(content: string): boolean {
+  return ATOMIC_PATTERNS.some((p) => p.test(content))
+}
+
+/**
+ * Function-like node types that can have TOCTOU patterns
+ */
+type FunctionLikeNode =
+  | ts.FunctionDeclaration
+  | ts.MethodDeclaration
+  | ts.ArrowFunction
+  | ts.FunctionExpression
+
+/**
+ * Get function name from a function-like node
+ */
+function getFunctionNameFromNode(node: FunctionLikeNode, sourceFile: ts.SourceFile): string {
+  if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) {
+    return node.name?.getText(sourceFile) ?? 'anonymous'
+  }
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    const parent = node.parent
+    if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+      return parent.name.getText(sourceFile)
+    }
+  }
+  return 'anonymous'
+}
+
+/**
+ * Check if a function has TOCTOU pattern
+ */
+function hasToctouPattern(funcText: string): boolean {
+  const funcHasRead = READ_PATTERNS.some((p) => p.test(funcText))
+  const funcHasUpdate = UPDATE_PATTERNS.some((p) => p.test(funcText))
+  const funcHasAtomic = ATOMIC_PATTERNS.some((p) => p.test(funcText))
+  return funcHasRead && funcHasUpdate && !funcHasAtomic
+}
+
+/**
+ * Check if node is a function-like node
+ */
+function isFunctionLikeNode(node: ts.Node): node is FunctionLikeNode {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isFunctionExpression(node)
+  )
+}
+
+/**
+ * Options for checking a function for TOCTOU patterns
+ */
+interface CheckFunctionForToctouOptions {
+  node: FunctionLikeNode
+  sourceFile: ts.SourceFile
+}
+
+/**
+ * Check a function for TOCTOU patterns
+ * @param options - The options for the check
+ * @returns CheckViolation if found, null otherwise
+ */
+function checkFunctionForToctou(options: CheckFunctionForToctouOptions): CheckViolation | null {
+  const { node, sourceFile } = options
+  const funcText = node.getText(sourceFile)
+
+  if (!hasToctouPattern(funcText)) {
+    return null
+  }
+
+  const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart())
+  const lineNum = line + 1
+  const funcName = getFunctionNameFromNode(node, sourceFile)
+
+  return {
+    line: lineNum,
+    column: character + 1,
+    message: `Function '${funcName}' has read-then-update pattern without atomic guarantees`,
+    severity: 'warning',
+    suggestion:
+      'Use optimistic locking: pass expectedVersion to update, or use ConditionExpression for DynamoDB, or wrap in a transaction with SELECT FOR UPDATE for SQL',
+    match: funcName,
+  }
+}
+
+/**
+ * Analyze a file for TOCTOU race conditions
+ */
+function analyzeFileForToctou(filePath: string, content: string): CheckViolation[] {
+  const violations: CheckViolation[] = []
+
+  // Skip files in safe TOCTOU paths (caches, rate limiters, CLI, etc.)
+  if (isSafeToctouPath(filePath)) {
+    return violations
+  }
+
+  // Quick filter: must have both read and update patterns
+  if (!hasRequiredPatterns(content)) {
+    return violations
+  }
+
+  // Skip if file has atomic patterns
+  if (hasAtomicPatterns(content)) {
+    return violations
+  }
+
+  const sourceFile = getSharedSourceFile(filePath, content)
+    if (!sourceFile) return []
+
+  const visit = (node: ts.Node): void => {
+    if (isFunctionLikeNode(node)) {
+      const violation = checkFunctionForToctou({ node, sourceFile })
+      if (violation) {
+        violations.push(violation)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+
+  visit(sourceFile)
+  return violations
+}
+
+/**
+ * Check: quality/toctou-race-condition
+ *
+ * Detects read-then-update patterns without atomic guarantees.
+ */
+export const toctouRaceCondition = defineCheck({
+  id: 'eb67d6f3-c984-485d-b077-1ebabea0d894',
+  slug: 'toctou-race-condition',
+  scope: { languages: ['typescript'], concerns: ['backend', 'server'] },
+  contentFilter: 'code-only',
+
+  confidence: 'high',
+  description: 'Detects read-then-update patterns without atomic guarantees',
+  longDescription: `**Purpose:** Detects Time-of-Check-Time-of-Use (TOCTOU) race conditions where data is read then updated without atomic guarantees.
+
+**Detects:** Analyzes each file individually using TypeScript AST. Finds functions containing both read operations (\`.get(\`, \`.find(\`, \`.findOne(\`, \`.getById(\`, \`.fetch(\`, \`.load(\`, \`.read(\`) and update operations (\`.update(\`, \`.save(\`, \`.put(\`, \`.set(\`, \`.patch(\`, \`.modify(\`) without any atomic pattern (\`expectedVersion\`, \`ConditionExpression\`, \`transaction\`, \`acquireLock\`, \`mutex\`, \`optimisticLock\`, etc.). Skips safe contexts: in-memory caches, rate limiters, CLI/devtools, config/registry files.
+
+**Why it matters:** TOCTOU bugs allow concurrent requests to overwrite each other's changes, causing silent data loss that only manifests under load.
+
+**Scope:** General best practice`,
+  tags: ['quality', 'performance', 'best-practices'],
+  fileTypes: ['ts'],
+  // @fitness-ignore-next-line no-hardcoded-timeouts -- framework default for fitness check execution
+  timeout: 180000, // 3 minutes - analyzes read-then-update patterns
+
+  analyze(content, filePath) {
+    // Skip test files — TOCTOU patterns in tests are low-risk
+    if (isTestFile(filePath)) return []
+    return analyzeFileForToctou(filePath, content)
+  },
+})

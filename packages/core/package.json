@@ -1,0 +1,52 @@
+{
+  "name": "@opensip-tools/core",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Core framework for OpenSIP Tools — check definitions, registry, recipes",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opensip-ai/opensip-tools.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/opensip-ai/opensip-tools",
+  "bugs": {
+    "url": "https://github.com/opensip-ai/opensip-tools/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./errors": "./dist/lib/errors.js",
+    "./logger": "./dist/lib/logger.js",
+    "./types": "./dist/types/index.js",
+    "./signal": "./dist/types/signal.js",
+    "./framework/*": "./dist/framework/*",
+    "./recipes/*": "./dist/recipes/*",
+    "./targets": "./dist/targets/index.js",
+    "./targets/*": "./dist/targets/*",
+    "./signalers": "./dist/signalers/index.js",
+    "./signalers/*": "./dist/signalers/*",
+    "./plugins": "./dist/plugins/index.js",
+    "./plugins/*": "./dist/plugins/*"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "glob": "^11.0.0",
+    "js-yaml": "^4.1.0",
+    "minimatch": "^10.0.0",
+    "typescript": "~5.7.0",
+    "ulid": "^2.4.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.0",
+    "@types/node": "^22.0.0",
+    "vitest": "^2.1.0"
+  }
+}

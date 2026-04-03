@@ -1,0 +1,441 @@
+// @fitness-ignore-file unused-config-options -- Config options reserved for future use or environment-specific
+/**
+ * @fileoverview ADR-034: Pre-Launch Clean Codebase Policy check
+ * @invariants standard
+ * @module cli/devtools/fitness/src/checks/quality/pre-launch-clean-codebase
+ * @version 3.0.0
+ * @see ADR-034 - Pre-Launch Clean Codebase Policy
+ *
+ * This check ensures no backwards compatibility code exists during pre-launch phase.
+ * The codebase has no external consumers, so we fix things properly without maintaining
+ * backwards compatibility.
+ *
+ * Detected patterns:
+ * - @deprecated tags
+ * - Compatibility layer classes/functions
+ * - Legacy wrapper patterns
+ * - Migration utilities
+ * - Version compatibility checks
+ * - Backwards compatibility comments
+ * - Shim/adapter patterns for compatibility
+ */
+
+import { defineCheck, type CheckViolation } from '@opensip-tools/core'
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const EXCLUDE_PATTERNS = [
+  /fitness/,
+  /test/,
+  /spec/,
+  /docs/,
+  /reports/,
+  /versioning/, // Exclude versioning module - contains legitimate schema migration utilities
+]
+
+// =============================================================================
+// TYPES
+// =============================================================================
+
+type ViolationType =
+  | 'deprecated-tag'
+  | 'deprecated-comment'
+  | 'compatibility-layer'
+  | 'migration-utility'
+  | 'legacy-code-path'
+  | 'version-check'
+  | 'backwards-compat-comment'
+  | 'temporary-workaround'
+  | 'migration-code'
+  | 'shim-adapter'
+
+/**
+ * Pattern matcher function type - used instead of regex for complex patterns
+ * to avoid ReDoS vulnerabilities and reduce complexity.
+ */
+type PatternMatcher = (line: string) => boolean
+
+interface PatternConfig {
+  /**
+   * Pattern can be either a RegExp (for simple patterns) or a function (for complex patterns).
+   * Use functions when: regex would be vulnerable to ReDoS, regex complexity > 20, or when
+   * string operations are more readable.
+   */
+  pattern: RegExp | PatternMatcher
+  type: ViolationType
+  severity: 'ERROR' | 'WARNING'
+  message: string
+  suggestion?: string
+  keywords?: string[] // For pre-filtering with string checks
+}
+
+// =============================================================================
+// PATTERN MATCHERS
+// =============================================================================
+
+/**
+ * Matches @deprecated JSDoc tags.
+ * Uses string operations to avoid regex complexity.
+ */
+function matchDeprecatedTag(line: string): boolean {
+  const trimmed = line.trim()
+  // Handle JSDoc lines: " * @deprecated" or "@deprecated"
+  const normalized = trimmed.startsWith('*') ? trimmed.slice(1).trim() : trimmed
+  return normalized.toLowerCase().startsWith('@deprecated')
+}
+
+/**
+ * Matches declarations with "compatibilitylayer" in the name.
+ * Pattern: (class|function|const|let|var) SomeCompatibilityLayerName
+ */
+function matchCompatibilityLayer(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  if (!lowerLine.includes('compatibilitylayer')) return false
+  const declarationKeywords = ['class ', 'function ', 'const ', 'let ', 'var ']
+  return declarationKeywords.some((keyword) => lowerLine.includes(keyword))
+}
+
+/**
+ * Matches declarations with "legacywrapper" in the name.
+ */
+function matchLegacyWrapper(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  if (!lowerLine.includes('legacywrapper')) return false
+  const declarationKeywords = ['class ', 'function ', 'const ', 'let ', 'var ']
+  return declarationKeywords.some((keyword) => lowerLine.includes(keyword))
+}
+
+/**
+ * Matches declarations with "backwardcompat" in the name.
+ */
+function matchBackwardCompat(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  if (!lowerLine.includes('backwardcompat')) return false
+  const declarationKeywords = ['function ', 'const ', 'let ', 'var ']
+  return declarationKeywords.some((keyword) => lowerLine.includes(keyword))
+}
+
+/**
+ * Matches version compatibility checks.
+ * Pattern: if (version <comparison>) { ... compatibility ... }
+ */
+function matchVersionCheck(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  // Must have 'if' with 'version' and 'compatibility'
+  if (!lowerLine.includes('if') || !lowerLine.includes('version')) return false
+  if (!lowerLine.includes('compatibility')) return false
+  // Check for comparison operators near 'version'
+  const versionIdx = lowerLine.indexOf('version')
+  const afterVersion = lowerLine.slice(versionIdx)
+  // Simple check for comparison operators in first 20 chars after 'version'
+  const checkPortion = afterVersion.slice(0, 20)
+  return (
+    checkPortion.includes('<') ||
+    checkPortion.includes('>') ||
+    checkPortion.includes('=') ||
+    checkPortion.includes('!')
+  )
+}
+
+/**
+ * Matches HACK or issue-marker comments with workaround keywords.
+ */
+function matchTemporaryWorkaround(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  const hasMarker = lowerLine.includes('hack') || lowerLine.includes('fixme')
+  if (!hasMarker) return false
+  return (
+    lowerLine.includes('before launch') ||
+    lowerLine.includes('temporary') ||
+    lowerLine.includes('workaround')
+  )
+}
+
+/**
+ * Matches migration utility declarations.
+ * Pattern: (class|function|const|let|var) ...migrate/migration/migrator...
+ */
+function matchMigrationCode(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  if (!lowerLine.includes('migrat')) return false
+  const declarationKeywords = ['class ', 'function ', 'const ', 'let ', 'var ']
+  return declarationKeywords.some((keyword) => lowerLine.includes(keyword))
+}
+
+/**
+ * Matches backwards compatibility comments.
+ * Excludes: "backward compatible way" (semantic versioning descriptions)
+ */
+function matchBackwardsCompatComment(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+
+  // Check for "backwards compatib" or "backward compatib" but exclude "compatible way"
+  const hasBackwardCompat = lowerLine.includes('backward') && lowerLine.includes('compatib')
+  const isLegitimateDescription = lowerLine.includes('compatible way')
+  if (hasBackwardCompat && !isLegitimateDescription) {
+    return true
+  }
+
+  // Check other patterns
+  if (lowerLine.includes('legacy support')) return true
+  if (lowerLine.includes('deprecated but kept')) return true
+  if (lowerLine.includes('alias for') && lowerLine.includes('compat')) return true
+
+  return false
+}
+
+/**
+ * Matches shim declarations.
+ */
+function matchShimAdapter(line: string): boolean {
+  const lowerLine = line.toLowerCase()
+  if (!lowerLine.includes('shim')) return false
+  const declarationKeywords = ['class ', 'function ', 'const ', 'let ', 'var ']
+  return declarationKeywords.some((keyword) => lowerLine.includes(keyword))
+}
+
+// =============================================================================
+// PATTERN CONFIGURATION
+// =============================================================================
+
+const COMPATIBILITY_PATTERNS: readonly PatternConfig[] = [
+  // Only catch actual @deprecated JSDoc tags in production code
+  {
+    pattern: matchDeprecatedTag,
+    type: 'deprecated-tag',
+    severity: 'ERROR',
+    message:
+      'Found @deprecated JSDoc tag - remove this deprecated code and update all callers in the same PR (ADR-034)',
+    suggestion: 'Remove the deprecated code entirely and update all call sites in the same PR',
+    keywords: ['deprecated'],
+  },
+
+  // Very specific backwards compatibility class/function names
+  {
+    pattern: matchCompatibilityLayer,
+    type: 'compatibility-layer',
+    severity: 'ERROR',
+    message: 'Found compatibility layer class/function - refactor directly instead (ADR-034)',
+    suggestion: 'Refactor to use the new implementation directly without a compatibility layer',
+    keywords: ['compatibility'],
+  },
+  {
+    pattern: matchLegacyWrapper,
+    type: 'legacy-code-path',
+    severity: 'ERROR',
+    message: 'Found legacy wrapper class/function - remove and update all dependent code (ADR-034)',
+    suggestion:
+      'Remove the legacy wrapper and update all dependent code to use the modern implementation',
+    keywords: ['legacy'],
+  },
+
+  // Specific backwards compatibility utility patterns
+  {
+    pattern: matchBackwardCompat,
+    type: 'migration-utility',
+    severity: 'ERROR',
+    message: 'Found backwards compatibility utility - not needed during pre-launch phase (ADR-034)',
+    suggestion: 'Remove backwards compatibility utilities and use direct implementations',
+    keywords: ['backward', 'compat'],
+  },
+
+  // Specific version compatibility checks in code
+  {
+    pattern: matchVersionCheck,
+    type: 'version-check',
+    severity: 'ERROR',
+    message: 'Found version compatibility check - not needed during pre-launch (ADR-034)',
+    suggestion: 'Remove version checks and use a single implementation',
+    keywords: ['version', 'compatibility'],
+  },
+
+  // Temporary workarounds and hacks
+  {
+    pattern: matchTemporaryWorkaround,
+    type: 'temporary-workaround',
+    severity: 'ERROR',
+    message: 'Found temporary workaround - implement permanent solution before launch (ADR-034)',
+    suggestion: 'Replace temporary workaround with a permanent, production-ready solution',
+    keywords: ['HACK', 'FIXME', 'temporary', 'workaround'],
+  },
+
+  // Migration utilities
+  {
+    pattern: matchMigrationCode,
+    type: 'migration-code',
+    severity: 'ERROR',
+    message: 'Found migration utility - not needed during pre-launch phase (ADR-034)',
+    suggestion: 'Remove migration code and use direct implementation',
+    keywords: ['migrat'],
+  },
+
+  // Backwards compatibility comments
+  // Excludes: semantic versioning descriptions ("backward compatible way"), library compatibility
+  {
+    pattern: matchBackwardsCompatComment,
+    type: 'backwards-compat-comment',
+    severity: 'WARNING',
+    message: 'Found backwards compatibility comment - remove legacy code paths (ADR-034)',
+    suggestion: 'Remove the backwards compatibility code and associated comments',
+    keywords: ['backward', 'compat', 'legacy', 'deprecated'],
+  },
+
+  // Shim patterns for compatibility (removed 'adapter' as it causes too many false positives)
+  {
+    pattern: matchShimAdapter,
+    type: 'shim-adapter',
+    severity: 'WARNING',
+    message: 'Found shim pattern - verify this is not for backwards compatibility (ADR-034)',
+    suggestion:
+      "If this is for backwards compatibility, remove it. If it's a legitimate design pattern, add a comment explaining why",
+    keywords: ['shim'],
+  },
+]
+
+// =============================================================================
+// ANALYSIS FUNCTIONS
+// =============================================================================
+
+/**
+ * Check if a file should be excluded from scanning
+ */
+function shouldExcludeFile(relativePath: string): boolean {
+  return EXCLUDE_PATTERNS.some((pattern) => pattern.test(relativePath))
+}
+
+/**
+ * Check if a line matches a pattern (with keyword pre-filtering)
+ */
+function matchPattern(line: string, patternConfig: PatternConfig): boolean {
+  // Use string checks before pattern matching for performance
+  if (patternConfig.keywords) {
+    const lowerLine = line.toLowerCase()
+    const hasKeyword = patternConfig.keywords.some((keyword) =>
+      lowerLine.includes(keyword.toLowerCase()),
+    )
+    if (!hasKeyword) {
+      return false // Skip pattern matching if keywords not present
+    }
+  }
+
+  // Support both RegExp and function patterns
+  if (typeof patternConfig.pattern === 'function') {
+    return patternConfig.pattern(line)
+  }
+  return patternConfig.pattern.test(line)
+}
+
+interface ViolationResult {
+  line: number
+  type: ViolationType
+  message: string
+  suggestion: string | undefined
+  severity: 'ERROR' | 'WARNING'
+  match: string
+}
+
+/**
+ * Scan file content for compatibility violations
+ */
+function scanFileForViolations(content: string): ViolationResult[] {
+  const violations: ViolationResult[] = []
+
+  const lines = content.split('\n')
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex]
+    if (!line) continue
+    const lineNumber = lineIndex + 1
+
+    for (const patternConfig of COMPATIBILITY_PATTERNS) {
+      if (matchPattern(line, patternConfig)) {
+        violations.push({
+          line: lineNumber,
+          type: patternConfig.type,
+          message: patternConfig.message,
+          suggestion: patternConfig.suggestion,
+          severity: patternConfig.severity,
+          match: line.trim(),
+        })
+        break // Only report first matching pattern per line
+      }
+    }
+  }
+
+  return violations
+}
+
+// =============================================================================
+// CHECK DEFINITION
+// =============================================================================
+
+/**
+ * Check: quality/pre-launch-clean-codebase
+ *
+ * Ensures no backwards compatibility code exists during pre-launch phase.
+ * This is a pre-launch codebase with no external consumers, so we fix things
+ * properly without maintaining backwards compatibility.
+ *
+ * @see ADR-034 Pre-Launch Clean Codebase Policy
+ */
+export const preLaunchCleanCodebase = defineCheck({
+  id: '3a27c17d-a926-46a8-864d-610de1a385eb',
+  slug: 'pre-launch-clean-codebase',
+  scope: { languages: ['typescript'], concerns: ['backend', 'frontend', 'cli'] },
+  contentFilter: 'raw',
+
+  confidence: 'medium',
+  description: 'Ensures no backwards compatibility code exists during pre-launch phase',
+  longDescription: `**Purpose:** Enforces ADR-034's pre-launch clean codebase policy by detecting backwards compatibility code that is unnecessary before launch.
+
+**Detects:**
+- \`@deprecated\` JSDoc tags in production code
+- Declarations containing \`CompatibilityLayer\`, \`LegacyWrapper\`, \`BackwardCompat\`, or \`Shim\` in class/function/variable names
+- Version compatibility checks (\`if (version ...)\` with \`compatibility\`)
+- Migration utilities (declarations containing \`migrat\` keyword)
+- Temporary workaround comments (\`HACK\`/\`FIXME\` with \`before launch\`/\`temporary\`/\`workaround\`)
+- Backwards compatibility comments (\`legacy support\`, \`deprecated but kept\`, \`alias for ... compat\`)
+
+**Why it matters:** Pre-launch codebases have no external consumers, so backwards compatibility code adds unnecessary complexity. Fix things properly instead.
+
+**Scope:** Codebase-specific convention enforcing ADR-034. Analyzes each file individually (\`analyze\`). Targets production files, excluding fitness/test/docs/versioning paths.`,
+  tags: ['code-quality', 'compliance', 'adr-034', 'quality'],
+  fileTypes: ['ts', 'tsx'],
+  disabled: false,
+  docs: 'docs/adr/034-pre-launch-clean-codebase-policy.md',
+
+  analyze(content, filePath): CheckViolation[] {
+    const relativePath = filePath
+
+    // Skip excluded files
+    if (shouldExcludeFile(relativePath)) {
+      return []
+    }
+
+    // Quick filter: skip files without any keywords
+    const lowerContent = content.toLowerCase()
+    const hasAnyKeyword = COMPATIBILITY_PATTERNS.some((p) =>
+      p.keywords?.some((kw) => lowerContent.includes(kw.toLowerCase())),
+    )
+
+    if (!hasAnyKeyword) {
+      return []
+    }
+
+    const results = scanFileForViolations(content)
+
+    return results.map((v) => ({
+      line: v.line,
+      column: 0,
+      message: v.message,
+      severity: v.severity === 'ERROR' ? 'error' : 'warning',
+      type: v.type,
+      suggestion:
+        v.suggestion ??
+        'Remove this backwards compatibility code and implement the proper solution directly',
+      match: v.match,
+    }))
+  },
+})

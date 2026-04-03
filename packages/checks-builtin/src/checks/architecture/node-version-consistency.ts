@@ -1,0 +1,274 @@
+// @fitness-ignore-file fitness-check-standards -- Uses fs for package.json reading, not source file content
+/**
+ * @fileoverview Node version consistency fitness check
+ * @invariants
+ * - All engines.node fields must match root package.json
+ * - .nvmrc major version must match engines.node
+ * - @types/node major version must match engines.node
+ * - CI workflow node-version must match engines.node
+ * - Dockerfiles are NOT checked (covered by docker-version-sync)
+ * @module cli/devtools/fitness/src/checks/architecture/node-version-consistency
+ * @version 1.0.0
+ */
+
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+
+import { defineCheck, type CheckViolation, type FileAccessor } from '@opensip-tools/core'
+
+// =============================================================================
+// TYPES
+// =============================================================================
+
+interface RootPackageJson {
+  engines?: {
+    node?: string
+  }
+  devDependencies?: Record<string, string>
+}
+
+interface WorkspacePackageJson {
+  name?: string
+  engines?: {
+    node?: string
+  }
+  devDependencies?: Record<string, string>
+  dependencies?: Record<string, string>
+}
+
+// =============================================================================
+// REGEX PATTERNS
+// =============================================================================
+
+/** Extract major version from engines.node constraint like ">=22.0.0" → 22 */
+const ENGINES_NODE_MAJOR = /(\d+)/
+
+/** Match @types/node version like "^22.0.0" → 22 */
+const TYPES_NODE_MAJOR = /\^(\d+)/
+
+/** Match node-version in CI workflow YAML */
+const CI_NODE_VERSION = /node-version:\s*['"]?(\d+)['"]?/
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+/**
+ * Read and parse root package.json.
+ * @throws {Error} When the file exceeds 10MB
+ */
+function readRootPackageJson(cwd: string): RootPackageJson {
+  const pkgPath = path.join(cwd, 'package.json')
+  const stats = fs.statSync(pkgPath)
+  if (stats.size > 10_000_000) throw new Error(`File too large: ${pkgPath}`)
+  const raw = fs.readFileSync(pkgPath, 'utf-8')
+  return JSON.parse(raw) as RootPackageJson
+}
+
+/**
+ * Extract major Node version from engines.node constraint.
+ * e.g. ">=22.0.0" → 22
+ */
+function extractNodeMajor(constraint: string): number | null {
+  const match = ENGINES_NODE_MAJOR.exec(constraint)
+  const digit = match?.[1]
+  // @fitness-ignore-next-line numeric-validation -- regex guarantees digit-only string; null guard above
+  return digit ? parseInt(digit, 10) : null
+}
+
+// =============================================================================
+// PER-FILE ANALYSIS HELPERS
+// =============================================================================
+
+function checkNvmrc(
+  content: string,
+  filePath: string,
+  expectedMajor: number,
+  violations: CheckViolation[],
+): void {
+  const trimmed = content.trim()
+  const nvmrcMajor = parseInt(trimmed, 10)
+  if (isNaN(nvmrcMajor)) return
+
+  if (nvmrcMajor !== expectedMajor) {
+    violations.push({
+      line: 1,
+      filePath,
+      message: `.nvmrc specifies Node ${nvmrcMajor} but root package.json engines.node requires ${expectedMajor}`,
+      severity: 'error',
+      suggestion: `Change .nvmrc from "${trimmed}" to "${expectedMajor}"`,
+      type: 'nvmrc-version-mismatch',
+    })
+  }
+}
+
+function checkWorkspaceEngines(
+  content: string,
+  filePath: string,
+  expectedMajor: number,
+  rootConstraint: string,
+  violations: CheckViolation[],
+): void {
+  let pkg: WorkspacePackageJson
+  try {
+    pkg = JSON.parse(content) as WorkspacePackageJson
+  } catch {
+    // @swallow-ok expected for non-JSON files or malformed package.json
+    return
+  }
+
+  const enginesNode = pkg.engines?.node
+  if (!enginesNode) return
+
+  const workspaceMajor = extractNodeMajor(enginesNode)
+  if (workspaceMajor === null) return
+
+  if (workspaceMajor !== expectedMajor) {
+    const relPath = path.relative(process.cwd(), filePath)
+    violations.push({
+      line: 1,
+      filePath,
+      message: `${relPath} engines.node is "${enginesNode}" but root package.json has "${rootConstraint}"`,
+      severity: 'error',
+      suggestion: `Change engines.node from "${enginesNode}" to "${rootConstraint}"`,
+      type: 'workspace-engines-mismatch',
+    })
+  }
+}
+
+function checkTypesNode(
+  content: string,
+  filePath: string,
+  expectedMajor: number,
+  violations: CheckViolation[],
+): void {
+  let pkg: WorkspacePackageJson
+  try {
+    pkg = JSON.parse(content) as WorkspacePackageJson
+  } catch {
+    // @swallow-ok expected for non-JSON files or malformed package.json
+    return
+  }
+
+  const typesNodeVersion = pkg.devDependencies?.['@types/node'] ?? pkg.dependencies?.['@types/node']
+  if (!typesNodeVersion) return
+
+  const match = TYPES_NODE_MAJOR.exec(typesNodeVersion)
+  const typesMajor = match?.[1]
+  if (!typesMajor) return
+
+  // @fitness-ignore-next-line numeric-validation -- regex ^\d+ guarantees digit-only string
+  const typesMajorNum = parseInt(typesMajor, 10)
+  if (typesMajorNum !== expectedMajor) {
+    const relPath = path.relative(process.cwd(), filePath)
+    violations.push({
+      line: 1,
+      filePath,
+      message: `${relPath} has @types/node "${typesNodeVersion}" but engines.node major is ${expectedMajor}`,
+      severity: 'error',
+      suggestion: `Change @types/node from "${typesNodeVersion}" to "^${expectedMajor}.0.0"`,
+      type: 'types-node-mismatch',
+    })
+  }
+}
+
+function checkCiWorkflow(
+  content: string,
+  filePath: string,
+  expectedMajor: number,
+  violations: CheckViolation[],
+): void {
+  const lines = content.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i]
+    if (!rawLine) continue
+    const line = rawLine.trim()
+
+    const match = CI_NODE_VERSION.exec(line)
+    const ciVersion = match?.[1]
+    if (!ciVersion) continue
+
+    // @fitness-ignore-next-line numeric-validation -- regex (\d+) guarantees digit-only string
+    const ciMajor = parseInt(ciVersion, 10)
+    if (ciMajor !== expectedMajor) {
+      violations.push({
+        line: i + 1,
+        filePath,
+        message: `CI workflow uses node-version: '${ciVersion}' but root package.json engines.node requires ${expectedMajor}`,
+        severity: 'error',
+        suggestion: `Change node-version from '${ciVersion}' to '${expectedMajor}'`,
+        type: 'ci-node-version-mismatch',
+      })
+    }
+  }
+}
+
+// =============================================================================
+// CHECK DEFINITION
+// =============================================================================
+
+/**
+ * Check: architecture/node-version-consistency
+ *
+ * Validates that Node.js version references are consistent across the codebase:
+ * 1. .nvmrc matches root package.json engines.node
+ * 2. All workspace package.json engines.node fields match root
+ * 3. @types/node major version matches engines.node major
+ * 4. CI workflow node-version matches engines.node
+ *
+ * Note: Dockerfile FROM node:XX checks are handled by docker-version-sync.
+ */
+export const nodeVersionConsistency = defineCheck({
+  id: 'a7f1c2d3-4e5b-6a7c-8d9e-0f1a2b3c4d5e',
+  slug: 'node-version-consistency',
+  scope: { languages: ['json', 'typescript', 'yaml'], concerns: ['config'] },
+  contentFilter: 'raw',
+
+  confidence: 'medium',
+  description: 'Validate Node.js version consistency across configs',
+  longDescription: `**Purpose:** Ensures all Node.js version references across the codebase stay in sync with the root \`package.json\` \`engines.node\` field.
+
+**Detects:**
+- \`.nvmrc\` major version mismatches against \`engines.node\`
+- Workspace \`package.json\` \`engines.node\` fields that differ from root
+- \`@types/node\` major version mismatches in any \`package.json\`
+- CI workflow \`node-version:\` lines that don't match
+
+**Why it matters:** Version drift between .nvmrc, CI, and package.json leads to "works on my machine" issues and inconsistent runtime behavior.
+
+**Scope:** Codebase-specific convention. Cross-file analysis via \`analyzeAll\`. Dockerfiles are intentionally excluded (covered by \`docker-version-sync\`).`,
+  tags: ['node', 'version-sync', 'architecture'],
+
+  async analyzeAll(files: FileAccessor): Promise<CheckViolation[]> {
+    const violations: CheckViolation[] = []
+
+    // Read root package.json for version truth
+    const rootPkg = readRootPackageJson(process.cwd())
+    const rootConstraint = rootPkg.engines?.node
+    if (!rootConstraint) return violations
+
+    const expectedMajor = extractNodeMajor(rootConstraint)
+    if (expectedMajor === null) return violations
+
+    for (const filePath of files.paths) {
+      // @fitness-ignore-next-line performance-anti-patterns -- sequential file reading to control memory; FileAccessor is lazy
+      const content = await files.read(filePath)
+      const basename = path.basename(filePath)
+
+      if (basename === '.nvmrc') {
+        checkNvmrc(content, filePath, expectedMajor, violations)
+      } else if (basename === 'package.json') {
+        // Skip root package.json (it's the source of truth)
+        const relPath = path.relative(process.cwd(), filePath)
+        if (relPath === 'package.json') continue
+
+        checkWorkspaceEngines(content, filePath, expectedMajor, rootConstraint, violations)
+        checkTypesNode(content, filePath, expectedMajor, violations)
+      } else if (filePath.includes('.github/workflows/') && basename.endsWith('.yml')) {
+        checkCiWorkflow(content, filePath, expectedMajor, violations)
+      }
+    }
+
+    return violations
+  },
+})

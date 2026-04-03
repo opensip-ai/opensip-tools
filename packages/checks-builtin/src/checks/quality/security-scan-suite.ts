@@ -1,0 +1,89 @@
+// @fitness-ignore-file unused-config-options -- Config options reserved for future use or environment-specific
+/**
+ * @fileoverview Security Scanning Suite Check
+ * @invariants standard
+ * @module cli/devtools/fitness/src/checks/quality/security-scan-suite
+ * @version 3.0.0
+ *
+ * Consolidates security scanning tools:
+ * - npm audit (dependency vulnerabilities)
+ * - semgrep (static analysis)
+ */
+
+import { defineCheck, type CheckViolation } from '@opensip-tools/core'
+
+// =============================================================================
+// CHECK DEFINITION
+// =============================================================================
+
+/**
+ * Check: quality/security-scan-suite
+ *
+ * Unified security scanning with multiple tools.
+ */
+export const securityScanSuite = defineCheck({
+  id: '4dadedc7-24e6-4e36-b006-3f0ba93d55bb',
+  slug: 'security-scan-suite',
+  scope: { languages: ['typescript'], concerns: ['backend'] },
+
+  confidence: 'medium',
+  description: 'Dependency vulnerability scanning via package manager audit',
+  longDescription: `**Purpose:** Runs dependency vulnerability scanning using the project's package manager (pnpm, yarn, or npm).
+
+**Detects:**
+- Critical and high severity vulnerabilities (reported as errors)
+- Moderate severity vulnerabilities (reported as warnings)
+- Auto-detects package manager from lockfile: pnpm-lock.yaml → pnpm, yarn.lock → yarn, otherwise npm
+
+**Why it matters:** Automated security scanning catches known vulnerabilities in dependencies before they reach production, reducing the attack surface.
+
+**Scope:** General best practice. Runs external tool (\`command\`): auto-detected \`audit --json\`. 3-minute timeout for longer scans.`,
+  tags: ['security', 'compliance', 'quality'],
+  fileTypes: ['ts', 'tsx'],
+  timeout: 180_000, // 3 minutes - security scans take longer
+
+  command: {
+    // Detect package manager: prefer pnpm > yarn > npm (matches lockfile present in cwd)
+    bin: 'sh',
+    args: ['-c', 'if [ -f pnpm-lock.yaml ]; then pnpm audit --json 2>/dev/null; elif [ -f yarn.lock ]; then yarn audit --json 2>/dev/null; else npm audit --json 2>/dev/null; fi; exit 0'],
+    expectedExitCodes: [0, 1], // audit tools return 1 when vulnerabilities found
+
+    parseOutput(stdout, _stderr, _exitCode): CheckViolation[] {
+      const violations: CheckViolation[] = []
+
+      // Parse npm audit results
+      try {
+        const auditResult = JSON.parse(stdout)
+        const meta = auditResult.metadata?.vulnerabilities ?? {}
+        const count = (meta.critical ?? 0) + (meta.high ?? 0) + (meta.moderate ?? 0)
+
+        if (count > 0) {
+          const severity = getNpmAuditSeverity(meta)
+          violations.push({
+            line: 1,
+            message: `npm audit found ${count} vulnerabilities`,
+            severity: severity === 'critical' || severity === 'high' ? 'error' : 'warning',
+            suggestion:
+              'Run `npm audit fix` to automatically fix vulnerabilities, or `npm audit` for details. For breaking changes, manually update the affected packages',
+            type: `security-${severity}`,
+            match: 'npm-audit',
+            filePath: 'package.json',
+          })
+        }
+      } catch {
+        // @swallow-ok Ignore parse errors
+      }
+
+      return violations
+    },
+  },
+})
+
+/**
+ * Determine severity from npm audit metadata
+ */
+function getNpmAuditSeverity(meta: { critical?: number; high?: number }): string {
+  if (meta.critical && meta.critical > 0) return 'critical'
+  if (meta.high && meta.high > 0) return 'high'
+  return 'medium'
+}
